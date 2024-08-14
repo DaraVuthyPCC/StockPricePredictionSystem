@@ -1,7 +1,8 @@
-numpy
-matplotlib
-pandas
-tensorflow
-scikit-learn
+numpy~=1.26.4
+matplotlib~=3.9.0
+pandas~=2.2.2
+tensorflow~=2.17.0
+scikit-learn~=1.5.1
 pandas-datareader
-yfinance
+yfinance~=0.2.41
+plotly~=5.23.0
