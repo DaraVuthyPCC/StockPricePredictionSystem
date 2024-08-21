@@ -33,7 +33,7 @@ def check_date(prompt):
             print("Invalid date format. Please enter the date in YYYY-MM-DD format.")
 
 def load_and_process_data(company, predict_day, scale, shuffle, future, split_by_date,
-                          test_size, price_value, random_state, feature_columns):
+                          test_size, price_value, random_state, data_file, feature_columns):
     """
         company: we are going to use apple stock price for this assignment which is 'AAPL'
         predict_days: number of days to look back to base the prediction which i choose 60
@@ -117,6 +117,8 @@ def load_and_process_data(company, predict_day, scale, shuffle, future, split_by
                                                             random_state=random_state)
         result.update({"X_train": X_train, "y_train": y_train, "X_test": X_test, "y_test": y_test})
 
+    result["df"].to_csv(data_file)
+
     return result
 
 COMPANY = 'AAPL'
@@ -124,7 +126,7 @@ PREDICTION_DAYS = 60
 SCALE = True
 SHUFFLE = False
 FUTURE = 1
-SPLIT_BY_DATE = True
+SPLIT_BY_DATE = False
 TEST_SIZE = 0.2
 PRICE_VALUE = "Close"
 RANDOM_STATE = 344
@@ -134,9 +136,7 @@ date_now = time.strftime("%Y-%m-%d")
 data_file = f"{data_dir}/{COMPANY}-{date_now}-{SCALE}-{SPLIT_BY_DATE}-{PRICE_VALUE}.csv"
 
 data = load_and_process_data(COMPANY, PREDICTION_DAYS, SCALE, SHUFFLE, FUTURE, 
-                             SPLIT_BY_DATE, TEST_SIZE, PRICE_VALUE, RANDOM_STATE, FEATURE_COLUMNS)
-
-data["df"].to_csv(data_file)
+                             SPLIT_BY_DATE, TEST_SIZE, PRICE_VALUE, RANDOM_STATE, data_file, FEATURE_COLUMNS)
 
 # Building model
 model_dir = 'model'
