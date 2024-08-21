@@ -1,13 +1,15 @@
 # import necessary package
 import os
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-from datetime import timedelta, datetime as dt
 import tensorflow as tf
 import yfinance as yf
 import plotly.graph_objects as go
+import time
 
+from datetime import timedelta, datetime as dt
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.models import Sequential, load_model
@@ -31,7 +33,7 @@ def check_date(prompt):
             print("Invalid date format. Please enter the date in YYYY-MM-DD format.")
 
 def load_and_process_data(company, predict_day, scale, shuffle, future, split_by_date,
-                          test_size, feature_columns):
+                          test_size, price_value, random_state, feature_columns):
     """
         company: we are going to use apple stock price for this assignment which is 'AAPL'
         predict_days: number of days to look back to base the prediction which i choose 60
@@ -59,7 +61,7 @@ def load_and_process_data(company, predict_day, scale, shuffle, future, split_by
         # already loaded, use it directly
         df = company
     else:
-        raise TypeError("ticker can be either a str or a `pd.DataFrame` instances")
+        raise TypeError("ticker can be either a str or a pd.DataFrame instances")
 
     df = df.interpolate().dropna()
     # all the value we return from this function
@@ -75,12 +77,9 @@ def load_and_process_data(company, predict_day, scale, shuffle, future, split_by
     if "date" not in df.columns:
         df["date"] = df.index
 
-    df['Log_Return'] = np.log(df['Adj Close'] / df['Adj Close'].shift(1))
-    df.dropna(inplace=True)
-
     if scale:
         column_scaler = {}
-        # scale the data from 0 to 1
+        # scale the data from -1 to 1
         for column in feature_columns:
             scaler = MinMaxScaler(feature_range=(-1, 1))
             df[column] = scaler.fit_transform(df[column].values.reshape(-1, 1))
@@ -88,11 +87,11 @@ def load_and_process_data(company, predict_day, scale, shuffle, future, split_by
         # add the MinMaxScaler instances to the result returned
         result["column_scaler"] = column_scaler
 
-    # add the target column (label) by shifting by `future`
-    df['future'] = df['Adj Close'].shift(-future)
+    # add the target column (label) by shifting by future
+    df['future'] = df[price_value].shift(-future)
 
     # dropping NaNs
-    # df.dropna(inplace=True)
+    df.dropna(inplace=True)
     # filling NaNs with interpolation
     df.interpolate()
 
@@ -114,29 +113,28 @@ def load_and_process_data(company, predict_day, scale, shuffle, future, split_by
                        "X_test": x_train[train_samples:], "y_test": y_train[train_samples:]})
     else:
         X_train, X_test, y_train, y_test = train_test_split(x_train, y_train,
-                                                            test_size=test_size, shuffle=shuffle)
+                                                            test_size=test_size, shuffle=shuffle,
+                                                            random_state=random_state)
         result.update({"X_train": X_train, "y_train": y_train, "X_test": X_test, "y_test": y_test})
 
     return result
 
 COMPANY = 'AAPL'
-PREDICTION_DAYS = 120 
+PREDICTION_DAYS = 60 
 SCALE = True
 SHUFFLE = False
 FUTURE = 1
 SPLIT_BY_DATE = True
-TEST_SIZE = 0.3
-PRICE_VALUE = "Adj Close"
+TEST_SIZE = 0.2
+PRICE_VALUE = "Close"
+RANDOM_STATE = 344
 FEATURE_COLUMNS = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+date_now = time.strftime("%Y-%m-%d")
 
-# TRAIN_START = '2020-01-01'     # Start date to read
-# TRAIN_END = '2023-08-01'       # End date to read
-
-# Check if data exists
-data_file = f"{data_dir}/{COMPANY}.csv"
+data_file = f"{data_dir}/{COMPANY}-{date_now}-{SCALE}-{SPLIT_BY_DATE}-{PRICE_VALUE}.csv"
 
 data = load_and_process_data(COMPANY, PREDICTION_DAYS, SCALE, SHUFFLE, FUTURE, 
-                             SPLIT_BY_DATE, TEST_SIZE, FEATURE_COLUMNS)
+                             SPLIT_BY_DATE, TEST_SIZE, PRICE_VALUE, RANDOM_STATE, FEATURE_COLUMNS)
 
 data["df"].to_csv(data_file)
 
@@ -162,23 +160,19 @@ else:
         Dense(1)
     ])
     model.compile(optimizer='adam', loss='mean_squared_error')
-    early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
-    model.fit(data["X_train"], data["y_train"], epochs=100, batch_size=32,
-              validation_split=0.2, callbacks=[early_stopping, reduce_lr])
+    # early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    # reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
+    model.fit(data["X_train"], data["y_train"], epochs=50, batch_size=64)
+            #   validation_split=0.2, callbacks=[early_stopping, reduce_lr])
     model.save(model_file)
 
 # Load the test data
 TEST_START = '2024-01-01'
-TEST_END = '2024-08-21'
-
-# test_data = web.DataReader(COMPANY, DATA_SOURCE, TEST_START, TEST_END)
+TEST_END = '2024-08-15'
 
 test_data_file = f"{data_dir}/{COMPANY}_test.csv"
-prepared_test_data_file = f"{data_dir}/{COMPANY}_prepared_test.csv"
 
 test_data = yf.download(COMPANY, TEST_START, TEST_END)
-test_data.to_csv(test_data_file)
 
 test_data = test_data[1:]
 
@@ -187,9 +181,9 @@ total_dataset = pd.concat((data["df"][PRICE_VALUE], test_data[PRICE_VALUE]), axi
 
 model_inputs = total_dataset[len(total_dataset) - len(test_data) - PREDICTION_DAYS:].values
 model_inputs = model_inputs.reshape(-1, 1)
-scaler = data["column_scaler"]["Adj Close"]
+scaler = data["column_scaler"][PRICE_VALUE]
 model_inputs = scaler.transform(model_inputs)
-test_data.to_csv(prepared_test_data_file)
+test_data.to_csv(test_data_file)
 
 x_test = []
 for x in range(PREDICTION_DAYS, len(model_inputs)):
@@ -229,8 +223,8 @@ print(f"Prediction: {prediction}")
 last_date = test_data.index[-1]
 next_day = last_date + timedelta(days=1)
 
-df = pd.read_csv(prepared_test_data_file, index_col='Date', parse_dates=True)
-df_future = pd.DataFrame([prediction[0][0]], index=[next_day], columns=['Close'])
+df = pd.read_csv(test_data_file, index_col='Date', parse_dates=True)
+df_future = pd.DataFrame([prediction[0][0]], index=[next_day], columns=[PRICE_VALUE])
 
 # Candlesticks chart
 fig = go.Figure(data=[go.Candlestick(
@@ -264,11 +258,3 @@ fig.update_layout(
 )
 
 fig.show()
-
-plt.plot(actual_prices, color="black", label=f"Actual {COMPANY} Price")
-plt.plot(predicted_prices, color="green", label=f"Predicted {COMPANY} Price")
-plt.title(f"{COMPANY} Share Price")
-plt.xlabel("Time")
-plt.ylabel(f"{COMPANY} Share Price")
-plt.legend()
-plt.show()
