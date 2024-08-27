@@ -121,8 +121,56 @@ def load_and_process_data(company, predict_day, scale, shuffle, future, split_by
 
     return result
 
+
+# candlestick chart function that take in dataframe and number of trading days as parameters
+def candlestick_chart(df, n):
+    # if the number of trading days is more than one, we change the features column into first, max, min, last
+    # else just keep it the same
+    if n > 1:
+        df_resampled = df.resample(f'{n}D').agg({
+            'Open': 'first',
+            'High': 'max',
+            'Low': 'min',
+            'Close': 'last'
+        }).dropna()
+    else:
+        df_resampled = df.copy()
+
+    fig = go.Figure(data=[go.Candlestick(
+        x=df_resampled.index,
+        open=df_resampled['Open'],
+        high=df_resampled['High'],
+        low=df_resampled['Low'],
+        close=df_resampled['Close'],
+        increasing_line_color='green',  # Color for increasing candles
+        decreasing_line_color='red',    # Color for decreasing candles
+        name='Candlestick'
+    )])
+
+    fig.add_trace(go.Scatter(
+        x=[df_resampled.index[-1], next_day],
+        y=[df_resampled['Close'].iloc[-1], prediction[0][0]],
+        mode='lines+markers',
+        line=dict(color='orange', width=2),
+        marker=dict(size=8),
+        name='Next Day Prediction'
+    ))
+
+    fig.update_layout(
+        title=f'Stock Price Candlestick Chart ({n} Trading Day(s) per Candle)',
+        xaxis_title='Date',
+        yaxis_title='Price',
+        # xaxis_rangeslider_visible=False,
+        template='plotly_dark',
+        width=1200,
+        height=600,
+    )
+
+    fig.show()
+
+
 COMPANY = 'AAPL'
-PREDICTION_DAYS = 60 
+PREDICTION_DAYS = 60
 SCALE = True
 SHUFFLE = False
 FUTURE = 1
@@ -135,7 +183,7 @@ date_now = time.strftime("%Y-%m-%d")
 
 data_file = f"{data_dir}/{COMPANY}-{date_now}-{SCALE}-{SPLIT_BY_DATE}-{PRICE_VALUE}.csv"
 
-data = load_and_process_data(COMPANY, PREDICTION_DAYS, SCALE, SHUFFLE, FUTURE, 
+data = load_and_process_data(COMPANY, PREDICTION_DAYS, SCALE, SHUFFLE, FUTURE,
                              SPLIT_BY_DATE, TEST_SIZE, PRICE_VALUE, RANDOM_STATE, data_file, FEATURE_COLUMNS)
 
 # Building model
@@ -226,35 +274,6 @@ next_day = last_date + timedelta(days=1)
 df = pd.read_csv(test_data_file, index_col='Date', parse_dates=True)
 df_future = pd.DataFrame([prediction[0][0]], index=[next_day], columns=[PRICE_VALUE])
 
-# Candlesticks chart
-fig = go.Figure(data=[go.Candlestick(
-    x=df.index,
-    open=df['Open'],
-    high=df['High'],
-    low=df['Low'],
-    close=df['Close'],
-    increasing_line_color='green',  # Color for increasing candles
-    decreasing_line_color='red',    # Color for decreasing candles
-    name='Candlestick'
-)])
+n = 15 # number of trading days
 
-fig.add_trace(go.Scatter(
-    x=[df.index[-1], next_day],
-    y=[df['Close'].iloc[-1], prediction[0][0]],
-    mode='lines+markers',
-    line=dict(color='orange', width=2),
-    marker=dict(size=8),
-    name='Next Day Prediction'
-))
-
-fig.update_layout(
-    title='Stock Price Candlestick Chart',
-    xaxis_title='Date',
-    yaxis_title='Price',
-    xaxis_rangeslider_visible=False,
-    template='plotly_dark',
-    width=1200,
-    height=600,
-)
-
-fig.show()
+fig = candlestick_chart(df, n)
