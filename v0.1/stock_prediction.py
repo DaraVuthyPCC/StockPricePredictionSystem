@@ -168,6 +168,23 @@ def candlestick_chart(df, n):
 
     fig.show()
 
+# graphing boxplot chart
+def boxplot_chart(df, n, step=5):
+    rolling_windows = [df['Close'][i:i + n].values for i in range(0, len(df) - n + 1)]
+    window_indices = range(len(rolling_windows))
+
+    plt.figure(figsize=(12, 6))
+    plt.boxplot(rolling_windows, showfliers=False)
+
+    plt.xticks(ticks=np.arange(1, len(window_indices) + 1, step=step),
+               labels=np.arange(1, len(window_indices) + 1, step=step))
+
+
+    plt.title(f'Boxplot of {COMPANY} Stock Prices Over a Moving Window of {n} Trading Day(s)')
+    plt.xlabel('Rolling Window Index')
+    plt.ylabel('Price')
+    plt.grid(True)
+    plt.show()
 
 COMPANY = 'AAPL'
 PREDICTION_DAYS = 60
@@ -274,6 +291,7 @@ next_day = last_date + timedelta(days=1)
 df = pd.read_csv(test_data_file, index_col='Date', parse_dates=True)
 df_future = pd.DataFrame([prediction[0][0]], index=[next_day], columns=[PRICE_VALUE])
 
-n = 15 # number of trading days
+n = 3 # number of trading days
 
 fig = candlestick_chart(df, n)
+fig1 = boxplot_chart(df, n)
