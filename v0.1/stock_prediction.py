@@ -170,7 +170,11 @@ def candlestick_chart(df, n):
 
 # graphing boxplot chart
 def boxplot_chart(df, n, step=5):
-    rolling_windows = [df['Close'][i:i + n].values for i in range(0, len(df) - n + 1)]
+    if n == 1:
+        rolling_windows = [df['Close'].values]
+    else:
+        rolling_windows = [df['Close'][i:i + n].values for i in range(0, len(df) - n + 1)]
+
     window_indices = range(len(rolling_windows))
 
     plt.figure(figsize=(12, 6))
@@ -178,7 +182,6 @@ def boxplot_chart(df, n, step=5):
 
     plt.xticks(ticks=np.arange(1, len(window_indices) + 1, step=step),
                labels=np.arange(1, len(window_indices) + 1, step=step))
-
 
     plt.title(f'Boxplot of {COMPANY} Stock Prices Over a Moving Window of {n} Trading Day(s)')
     plt.xlabel('Rolling Window Index')
