@@ -189,6 +189,33 @@ def boxplot_chart(df, n, step=5):
     plt.grid(True)
     plt.show()
 
+# creating a model
+def create_model(sequence_length, n_features, units=256, cell=LSTM, n_layers=2, 
+                dropout=0.3, loss="mean_absolute_error", optimizer="adam"):
+    """
+        sequence_length: the number of steps that the model take in each input
+        n_features: the number of features
+        units: the number of units in each LSTM cell which determine the dimensionality of output space of each layer
+        cell: the type of networks to use
+        n_layers: the number of stacked layer
+        dropout: the dropout rate after each layer to prevent overfitting
+        loss: the loss function that is used to measure error
+        optimizer: the optimizer that is used to minimize the loss function
+    """
+    # a sequential model which has many layer
+    model = Sequential()
+    for i in range(n_layers):
+        if i == 0:
+            model.add(cell(units, return_sequences=True, input_shape=(sequence_length, n_features)))
+        elif i == n_layers - 1:
+            model.add(cell(units, return_sequences=False))
+        else:
+            model.add(cell(units, return_sequences=True))
+        model.add(Dropout(dropout))
+    model.add(Dense(1))
+    model.compile(loss=loss, metrics=[loss], optimizer=optimizer)
+    return model
+
 COMPANY = 'AAPL'
 PREDICTION_DAYS = 60
 SCALE = True
@@ -206,9 +233,20 @@ data_file = f"{data_dir}/{COMPANY}-{date_now}-{SCALE}-{SPLIT_BY_DATE}-{PRICE_VAL
 data = load_and_process_data(COMPANY, PREDICTION_DAYS, SCALE, SHUFFLE, FUTURE,
                              SPLIT_BY_DATE, TEST_SIZE, PRICE_VALUE, RANDOM_STATE, data_file, FEATURE_COLUMNS)
 
+N_STEPS = 50
+UNITS = 256
+CELL = LSTM
+N_LAYERS = 4
+DROPOUT = 0.3
+LOSS = "mean_absolute_error"
+OPTIMIZER = "adam"
+EPOCHS = 50
+BATCH = 64
+
 # Building model
 model_dir = 'model'
-model_file = f'{model_dir}/{COMPANY}_model.keras'
+# Model name is gonna be saved based on the input we get from all the variable that we have set
+model_file = f'{model_dir}/{COMPANY}-{N_STEPS}-{UNITS}-{CELL.__name__}-{N_LAYERS}-{DROPOUT}-{LOSS}-{OPTIMIZER}-{EPOCHS}-{BATCH}_model.keras'
 
 # check if a model folder already exists
 if not os.path.exists(model_dir):
@@ -218,20 +256,9 @@ if not os.path.exists(model_dir):
 if os.path.isfile(model_file):
     model = load_model(model_file)
 else:
-    model = Sequential([
-        LSTM(50, return_sequences=True, input_shape=(PREDICTION_DAYS, len(FEATURE_COLUMNS))),
-        Dropout(0.2),
-        LSTM(50, return_sequences=True),
-        Dropout(0.2),
-        LSTM(50),
-        Dropout(0.2),
-        Dense(1)
-    ])
-    model.compile(optimizer='adam', loss='mean_squared_error')
-    # early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-    # reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
-    model.fit(data["X_train"], data["y_train"], epochs=50, batch_size=64)
-            #   validation_split=0.2, callbacks=[early_stopping, reduce_lr])
+    model = create_model(N_STEPS, len(FEATURE_COLUMNS), UNITS, CELL, N_LAYERS,
+                         DROPOUT, LOSS, OPTIMIZER)
+    model.fit(data["X_train"], data["y_train"], epochs=EPOCHS, batch_size=BATCH)
     model.save(model_file)
 
 # Load the test data
