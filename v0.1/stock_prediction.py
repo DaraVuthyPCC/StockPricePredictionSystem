@@ -13,7 +13,7 @@ from datetime import timedelta, datetime as dt
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Dense, Dropout, LSTM, Input
+from tensorflow.keras.layers import Dense, Dropout, LSTM, Input, GRU, SimpleRNN
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 # Create data folder if it does not exist
@@ -190,12 +190,12 @@ def boxplot_chart(df, n, step=5):
     plt.show()
 
 # creating a model
-def create_model(sequence_length, n_features, units=256, cell=LSTM, n_layers=2, 
-                dropout=0.3, loss="mean_absolute_error", optimizer="adam"):
+def create_model(sequence_length, n_features, units, cell, n_layers, 
+                dropout, output_activation, loss="mean_absolute_error", optimizer="adam"):
     """
         sequence_length: the number of steps that the model take in each input
         n_features: the number of features
-        units: the number of units in each LSTM cell which determine the dimensionality of output space of each layer
+        units: the number of units in each layer cell which determine the dimensionality of output space of each layer
         cell: the type of networks to use
         n_layers: the number of stacked layer
         dropout: the dropout rate after each layer to prevent overfitting
@@ -212,7 +212,7 @@ def create_model(sequence_length, n_features, units=256, cell=LSTM, n_layers=2,
         else:
             model.add(cell(units, return_sequences=True))
         model.add(Dropout(dropout))
-    model.add(Dense(1))
+    model.add(Dense(1, activation=output_activation))
     model.compile(loss=loss, metrics=[loss], optimizer=optimizer)
     return model
 
@@ -235,18 +235,19 @@ data = load_and_process_data(COMPANY, PREDICTION_DAYS, SCALE, SHUFFLE, FUTURE,
 
 N_STEPS = 50
 UNITS = 256
-CELL = LSTM
-N_LAYERS = 4
-DROPOUT = 0.3
+CELL = GRU
+N_LAYERS = 2
+DROPOUT = 0.5
 LOSS = "mean_absolute_error"
 OPTIMIZER = "adam"
-EPOCHS = 50
+EPOCHS = 25
 BATCH = 64
+ACTIVATION = "linear"
 
 # Building model
 model_dir = 'model'
 # Model name is gonna be saved based on the input we get from all the variable that we have set
-model_file = f'{model_dir}/{COMPANY}-{N_STEPS}-{UNITS}-{CELL.__name__}-{N_LAYERS}-{DROPOUT}-{LOSS}-{OPTIMIZER}-{EPOCHS}-{BATCH}_model.keras'
+model_file = f'{model_dir}/{COMPANY}-{N_STEPS}-{UNITS}-{CELL.__name__}-{N_LAYERS}-{DROPOUT}-{LOSS}-{OPTIMIZER}-{EPOCHS}-{BATCH}-{ACTIVATION}_model.keras'
 
 # check if a model folder already exists
 if not os.path.exists(model_dir):
@@ -257,7 +258,7 @@ if os.path.isfile(model_file):
     model = load_model(model_file)
 else:
     model = create_model(N_STEPS, len(FEATURE_COLUMNS), UNITS, CELL, N_LAYERS,
-                         DROPOUT, LOSS, OPTIMIZER)
+                         DROPOUT, ACTIVATION, LOSS, OPTIMIZER)
     model.fit(data["X_train"], data["y_train"], epochs=EPOCHS, batch_size=BATCH)
     model.save(model_file)
 
@@ -268,6 +269,7 @@ TEST_END = '2024-08-15'
 test_data_file = f"{data_dir}/{COMPANY}_test.csv"
 
 test_data = yf.download(COMPANY, TEST_START, TEST_END)
+test_data.interpolate().dropna()
 
 test_data = test_data[1:]
 
