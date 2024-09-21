@@ -1,4 +1,4 @@
-# import necessary package
+## Import necessary packages
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -7,22 +7,20 @@ import tensorflow as tf
 import yfinance as yf
 import plotly.graph_objects as go
 import time
-
 from datetime import timedelta, datetime as dt
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
 from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Dense, Dropout, LSTM, Input, GRU, SimpleRNN
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras.losses import huber
+from tensorflow.keras.layers import Dense, Dropout, LSTM
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.regularizers import l2
+from collections import deque
 
-# Create data folder if it does not exist
+# Create data directory if it doesn't exist
 data_dir = 'data'
-
 if not os.path.isdir(data_dir):
     os.mkdir(data_dir)
 
-# check if date is in the right format
+# Function to validate date input
 def check_date(prompt):
     while True:
         date_input = input(prompt)
@@ -32,296 +30,240 @@ def check_date(prompt):
         except ValueError:
             print("Invalid date format. Please enter the date in YYYY-MM-DD format.")
 
-def load_and_process_data(company, predict_day, scale, shuffle, future, split_by_date,
-                          test_size, price_value, random_state, data_file, feature_columns):
+# Function to load and process data
+def load_and_process_data(company, n_steps, scale, lookup_step, test_size, feature_columns):
     """
-        company: we are going to use apple stock price for this assignment which is 'AAPL'
-        predict_days: number of days to look back to base the prediction which i choose 60
-        scale: to scale the data between 0 and 1 which is set to true
-        shuffle: set to false as we want the data to be in order to get a more accurate prediction
-        future: the future to be predicted which is 1
-        test_size: the size of the data that is use to be tested which is 20%
-        feature_columns: list of features to use to feed into model
+    Desc: This function will load data of 'company' from yahoo finance and then process the data by removing NaNs,
+        scaling, based on multiple features, splitting the data into train set and test set and making a sequence based
+        on n_steps and lookup_step for future prediction
+    Parameters:
+        company: the name of the company I choose, 'AAPL' 
+        n_steps: the number of days to look back to based the prediction
+        scale: scaling boolean
+        lookup_step: the number of days into the future to predict
+        test_size: the ratio of splitting the data into train and test, 0.2
+        feature_columns: the features that we choose such as close, open, high, low
     """
-    # asking for date input from user
+    # Request start and end date inputs from user
     while True:
-        TRAIN_START = check_date("Please enter a start date for reading(YYYY-MM-DD): ")
-        TRAIN_END = check_date("Please enter an end date for reading(YYYY-MM-DD): ")
-        # check if end date is later than start date
-        if TRAIN_END > TRAIN_START:
+        train_start = check_date("Please enter a start date for reading (YYYY-MM-DD): ")
+        train_end = check_date("Please enter an end date for reading (YYYY-MM-DD): ")
+        if train_end > train_start:
             break
         else:
             print("Error: End Date must be later than Start Date. Please try again.")
 
-    # see if ticker is already a loaded stock from yahoo finance
-    if isinstance(company, str):
-        # load it from yfinance library
-        df = yf.download(company, TRAIN_START, TRAIN_END)
-    elif isinstance(company, pd.DataFrame):
-        # already loaded, use it directly
-        df = company
-    else:
-        raise TypeError("ticker can be either a str or a pd.DataFrame instances")
+    # Load data using yfinance
+    df = yf.download(company, train_start, train_end)
+    df = df.interpolate().dropna()  # Interpolate missing values and drop remaining NaNs
 
-    df = df.interpolate().dropna()
-    # all the value we return from this function
-    result = {}
-    # make a copy of the original data
-    result['df'] = df.copy()
-
-    # make sure every columns from feature_columns exist in the dataframe
+    # Validate feature columns
     for col in feature_columns:
         assert col in df.columns, f"'{col}' does not exist in the dataframe."
 
-    # add date as a columm
-    if "date" not in df.columns:
-        df["date"] = df.index
+    # Add date column if not present
+    if "Date" not in df.columns:
+        df["Date"] = df.index
 
+    # copy the original data for safe keeping
+    result = {'df': df.copy()}
+
+    # Scale the data if required
     if scale:
         column_scaler = {}
-        # scale the data from -1 to 1
         for column in feature_columns:
-            scaler = MinMaxScaler(feature_range=(-1, 1))
-            df[column] = scaler.fit_transform(df[column].values.reshape(-1, 1))
+            scaler = MinMaxScaler()
+            df[column] = scaler.fit_transform(np.expand_dims(df[column].values, axis=1))
             column_scaler[column] = scaler
-        # add the MinMaxScaler instances to the result returned
         result["column_scaler"] = column_scaler
 
-    # add the target column (label) by shifting by future
-    df['future'] = df[price_value].shift(-future)
+    # Add future column for prediction by shifting the 'close' value up by the amount of lookup_step
+    df['future'] = df['Close'].shift(-lookup_step)
+    
+    # Capture the last lookup_step before dropping NaNs
+    last_sequence = np.array(df[feature_columns].tail(lookup_step))
+    df.dropna(inplace=True)  # Drop rows with NaN values
 
-    # dropping NaNs
-    df.dropna(inplace=True)
-    # filling NaNs with interpolation
-    df.interpolate()
+    # Create sequences and targets
+    sequence_data = []
+    sequences = deque(maxlen=n_steps)
+    for entry, target in zip(df[feature_columns].values, df['future'].values):
+        sequences.append(entry)
+        if len(sequences) == n_steps:
+            sequence_data.append([np.array(sequences), target])
 
-    # To store the training data
-    x_train = []
-    y_train = []
+    # Prepare the last sequence for prediction
+    last_sequence = list(sequences) + list(last_sequence)
+    last_sequence = np.array(last_sequence).astype(np.float32)
+    result['last_sequence'] = last_sequence
 
-    # Prepare the data
-    for x in range(predict_day, len(df) - future + 1):
-        x_train.append(df[feature_columns].values[x-predict_day:x])
-        y_train.append(df[price_value].values[x:x + future])
+    # Split data into train and test sets
+    X, y = zip(*sequence_data)
+    X, y = np.array(X), np.array(y)
+    train_samples = int((1 - test_size) * len(X))
+    result["X_train"], result["y_train"] = X[:train_samples], y[:train_samples]
+    result["X_test"], result["y_test"] = X[train_samples:], y[train_samples:]
 
-    x_train, y_train = np.array(x_train), np.array(y_train)
-    x_train = np.reshape(x_train, (x_train.shape[0], predict_day, len(feature_columns)))
+    # Retrieve test dates and construct test dataframe
+    test_dates = result["X_test"][:, -1, -1]
+    if not pd.api.types.is_datetime64_any_dtype(result["df"].index):
+        result["df"].index = pd.to_datetime(result["df"].index)  # Convert index to datetime if needed
+    test_dates = pd.to_datetime(test_dates)  # Convert test dates to datetime
+    valid_dates = result["df"].index.intersection(test_dates)  # Only use valid dates in the dataframe index
 
-    if split_by_date:
-        train_samples = int((1 - test_size) * len(x_train))
-        result.update({"X_train": x_train[:train_samples], "y_train": y_train[:train_samples],
-                       "X_test": x_train[train_samples:], "y_test": y_train[train_samples:]})
-    else:
-        X_train, X_test, y_train, y_test = train_test_split(x_train, y_train,
-                                                            test_size=test_size, shuffle=shuffle,
-                                                            random_state=random_state)
-        result.update({"X_train": X_train, "y_train": y_train, "X_test": X_test, "y_test": y_test})
-
-    result["df"].to_csv(data_file)
+    # Create test dataframe with valid dates
+    result["test_df"] = result["df"].loc[valid_dates]
+    result["test_df"] = result["test_df"][~result["test_df"].index.duplicated(keep='first')]
 
     return result
 
+# Function to create a model
+def create_model(n_steps, n_features, units, cell, n_layers, dropout, activation, loss, optimizer):
+    """
+    Desc: This function will create a model based on the n_steps and n_features that are training based on the units, cell
+        n_layers, dropout, activation, loss, optimizer
+    Parameters:
+        n_steps: the number of days to look back to based the prediction, 50
+        n_features: the number of features that I use to load the data and create the model, 5
+        units: the number of neurons in each cell layer, 1024
+        cell: the type of recurrent cell, LSTM
+        n_layers: the number of recurrent layer, 4
+        dropout: the dropout rate of input units each update during training. 0.5
+        activation: the activation function, linear
+        loss: the loss function that measure the difference between predicted and actual values, mean_sqaured_error
+        optimizer: optimization algorithm, adam
+    """
+    model = Sequential()
+    for i in range(n_layers):
+        return_sequences = i < n_layers - 1
+        model.add(cell(units, return_sequences=return_sequences, input_shape=(n_steps, n_features)))
+        model.add(Dropout(dropout))
+    model.add(Dense(1, activation=activation))
+    model.compile(loss=loss, metrics=[loss], optimizer=optimizer)
+    return model
 
-# candlestick chart function that take in dataframe and number of trading days as parameters
+# Function to predict k days into the future
+def multi_step_predict(model, data, k):
+    """
+    Desc: predict the closing prices for the next k days using a trained model.
+    Parameters:
+        model: A trained machine learning model capable of making predictions.
+        data: A dictionary containing the 'last_sequence' or the initial input sequence for prediction.
+        k: The number of future steps (days) to predict.
+    """
+    # Extract the initial input from the data dictionary
+    current_input = data['last_sequence']
+    # Get the number of features from the input
+    feature_count = current_input.shape[1]
+    # Initialize predictions list
+    predictions = []
+    for _ in range(k):
+        # Reshape the input to match the model's expected input shape (1, n_steps, n_features)
+        current_input_reshaped = current_input.reshape(1, -1, feature_count)
+        # Make the prediction using the model
+        next_prediction = model.predict(current_input_reshaped)[0, 0]  # Assuming model outputs a 2D array [[prediction]]
+        # Append the prediction to the predictions list
+        predictions.append(next_prediction)
+        # Update the input by removing the first step and adding the new prediction
+        new_feature_row = [next_prediction] * feature_count  # Extend prediction with same values for all features
+        current_input = np.append(current_input[1:], [new_feature_row], axis=0)
+    return np.array(predictions)
+
+# Function to plot candlestick chart
 def candlestick_chart(df, n, prediction, future):
-    # if the number of trading days is more than one, we change the features column into first, max, min, last
-    # else just keep it the same
-    if n > 1:
-        df_resampled = df.resample(f'{n}D').agg({
-            'Open': 'first',
-            'High': 'max',
-            'Low': 'min',
-            'Close': 'last'
-        }).dropna()
-    else:
-        df_resampled = df.copy()
-
+    df_resampled = df.resample(f'{n}D').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last'}).dropna() if n > 1 else df.copy()
     last_date = df_resampled.index[-1]
     future_dates = [last_date + timedelta(days=i) for i in range(1, future + 1)]
-
-    fig = go.Figure(data=[go.Candlestick(
-        x=df_resampled.index,
-        open=df_resampled['Open'],
-        high=df_resampled['High'],
-        low=df_resampled['Low'],
-        close=df_resampled['Close'],
-        increasing_line_color='green',  # Color for increasing candles
-        decreasing_line_color='red',    # Color for decreasing candles
-        name='Candlestick'
-    )])
-
-    fig.add_trace(go.Scatter(
-        x=future_dates,
-        y=prediction[:future],
-        mode='lines+markers',
-        line=dict(color='orange', width=2),
-        marker=dict(size=8),
-        name=f'Next {future} Day Prediction'
-    ))
-
-    fig.update_layout(
-        title=f'Stock Price Candlestick Chart ({n} Trading Day(s) per Candle)',
-        xaxis_title='Date',
-        yaxis_title='Price',
-        template='plotly_dark',
-        width=1200,
-        height=600,
-    )
-
+    fig = go.Figure(data=[go.Candlestick(x=df_resampled.index, open=df_resampled['Open'], high=df_resampled['High'],
+                                         low=df_resampled['Low'], close=df_resampled['Close'], 
+                                         increasing_line_color='green', decreasing_line_color='red', name='Candlestick')])
+    fig.add_trace(go.Scatter(x=future_dates, y=prediction[:future], mode='lines+markers',
+                             line=dict(color='orange', width=2), marker=dict(size=8), name=f'Next {future} Day Prediction'))
+    fig.update_layout(title=f'Stock Price Candlestick Chart ({n} Trading Day(s) per Candle)', xaxis_title='Date',
+                      yaxis_title='Price', template='plotly_dark', width=1200, height=600)
     fig.show()
 
-# graphing boxplot chart
+# Function to plot boxplot chart
 def boxplot_chart(df, n, step=5):
-    if n == 1:
-        rolling_windows = [df['Close'].values]
-    else:
-        rolling_windows = [df['Close'][i:i + n].values for i in range(0, len(df) - n + 1)]
-
-    window_indices = range(len(rolling_windows))
-
+    rolling_windows = [df['Close'][i:i + n].values for i in range(0, len(df) - n + 1)]
     plt.figure(figsize=(12, 6))
     plt.boxplot(rolling_windows, showfliers=False)
-
-    plt.xticks(ticks=np.arange(1, len(window_indices) + 1, step=step),
-               labels=np.arange(1, len(window_indices) + 1, step=step))
-
+    plt.xticks(ticks=np.arange(1, len(rolling_windows) + 1, step=step), labels=np.arange(1, len(rolling_windows) + 1, step=step))
     plt.title(f'Boxplot of {COMPANY} Stock Prices Over a Moving Window of {n} Trading Day(s)')
     plt.xlabel('Rolling Window Index')
     plt.ylabel('Price')
     plt.grid(True)
     plt.show()
 
-# creating a model
-def create_model(sequence_length, n_features, units, cell, n_layers, 
-                dropout, future, output_activation, loss="mean_absolute_error", optimizer="adam"):
-    """
-        sequence_length: the number of steps that the model take in each input
-        n_features: the number of features
-        units: the number of units in each layer cell which determine the dimensionality of output space of each layer
-        cell: the type of networks to use
-        n_layers: the number of stacked layer
-        dropout: the dropout rate after each layer to prevent overfitting
-        loss: the loss function that is used to measure error
-        optimizer: the optimizer that is used to minimize the loss function
-    """
-    # a sequential model which has many layer
-    model = Sequential()
-    for i in range(n_layers):
-        if i == 0:
-            model.add(cell(units, return_sequences=True, input_shape=(sequence_length, n_features)))
-        elif i == n_layers - 1:
-            model.add(cell(units, return_sequences=False))
-        else:
-            model.add(cell(units, return_sequences=True))
-        model.add(Dropout(dropout))
-    model.add(Dense(future, activation=output_activation))
-    model.compile(loss=loss, metrics=['mean_squared_error'], optimizer=optimizer)
-    return model
-
+# Define constants
 COMPANY = 'AAPL'
-PREDICTION_DAYS = 60
 SCALE = True
-SHUFFLE = False
-FUTURE = 5
-SPLIT_BY_DATE = True
+FUTURE = 15
 TEST_SIZE = 0.2
-PRICE_VALUE = "Close"
-RANDOM_STATE = 344
-FEATURE_COLUMNS = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+FEATURE_COLUMNS = ["Close", "Volume", "Open", "High", "Low"]
 FEATURE_COLUMNS1 = ["Close"]
+N_STEPS = 100
+UNITS = 1024
+CELL = LSTM
+N_LAYERS = 4
+DROPOUT = 0.5
+LOSS = "mean_squared_error"
+EPOCHS = 100
+BATCH = 128
+ACTIVATION = "linear"
+OPTIMIZER = "adam"
 date_now = time.strftime("%Y-%m-%d")
 
-data_file = f"{data_dir}/{COMPANY}-{date_now}-{SCALE}-{SPLIT_BY_DATE}-{PRICE_VALUE}-{len(FEATURE_COLUMNS)}-{FUTURE}.csv"
+# Load and process data
+data = load_and_process_data(COMPANY, N_STEPS, SCALE, FUTURE, TEST_SIZE, FEATURE_COLUMNS)
 
-data = load_and_process_data(COMPANY, PREDICTION_DAYS, SCALE, SHUFFLE, FUTURE,
-                             SPLIT_BY_DATE, TEST_SIZE, PRICE_VALUE, RANDOM_STATE, data_file, FEATURE_COLUMNS)
-
-N_STEPS = 50
-UNITS = 256
-CELL = LSTM
-N_LAYERS = 2
-DROPOUT = 0.4
-LOSS = "huber"
-OPTIMIZER = "adam"
-EPOCHS = 100
-BATCH = 64
-ACTIVATION = "linear"
-
-# Building model
+# Model file path
 model_dir = 'model'
-# Model name is gonna be saved based on the input we get from all the variable that we have set
-model_file = f'{model_dir}/{COMPANY}-{N_STEPS}-{UNITS}-{CELL.__name__}-{N_LAYERS}-{DROPOUT}-{LOSS}-{OPTIMIZER}-{EPOCHS}-{BATCH}-{ACTIVATION}-{len(FEATURE_COLUMNS)}-{FUTURE}_model.keras'
+model_file = f'{model_dir}/{COMPANY}-{N_STEPS}-{UNITS}-{CELL.__name__}-{N_LAYERS}-{DROPOUT}-{LOSS}-{OPTIMIZER}-{EPOCHS}-{BATCH}-{ACTIVATION}-{len(FEATURE_COLUMNS)}_model.keras'
 
-# check if a model folder already exists
+# Create and/or load model
 if not os.path.exists(model_dir):
     os.makedirs(model_dir)
-
-# check if a model already exists
 if os.path.isfile(model_file):
     model = load_model(model_file)
 else:
-    model = create_model(N_STEPS, len(FEATURE_COLUMNS), UNITS, CELL, N_LAYERS,
-                         DROPOUT, FUTURE, ACTIVATION, LOSS, OPTIMIZER)
-    model.fit(data["X_train"], data["y_train"], epochs=EPOCHS, batch_size=BATCH,
-              validation_data=(data["X_test"], data["y_test"]),
-              callbacks=[EarlyStopping(patience=5), ReduceLROnPlateau()])
+    model = create_model(N_STEPS, len(FEATURE_COLUMNS), UNITS, CELL, N_LAYERS, DROPOUT, ACTIVATION, LOSS, OPTIMIZER)
+    model.fit(data["X_train"], data["y_train"], epochs=EPOCHS, batch_size=BATCH, 
+            validation_data=(data["X_test"], data["y_test"]), 
+            callbacks=[EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+    ])
     model.save(model_file)
 
-# Load the test data
-TEST_START = '2024-01-01'
-TEST_END = '2024-08-15'
+# Predict using the test data
+X_test = data["X_test"]
+y_test = data["y_test"]
+y_pred = model.predict(X_test)
 
-test_data_file = f"{data_dir}/{COMPANY}_test.csv"
+# Inverse transform predictions and actual values if scaling was applied
+if SCALE:
+    y_test = np.squeeze(data["column_scaler"]["Close"].inverse_transform(np.expand_dims(y_test, axis=0)))
+    y_pred = np.squeeze(data["column_scaler"]["Close"].inverse_transform(y_pred))
 
-test_data = yf.download(COMPANY, TEST_START, TEST_END)
-test_data.interpolate().dropna()
+# Prepare the final dataframe
+test_df = data["test_df"]
+test_df[f"close_{FUTURE}"] = y_pred
+test_df[f"true_close_{FUTURE}"] = y_test
+test_df.sort_index(inplace=True)
+final_df = test_df
 
-test_data = test_data[1:]
+k_days_predicted_price = multi_step_predict(model, data, FUTURE)
+price = data["column_scaler"]["Close"].inverse_transform(k_days_predicted_price.reshape(-1, 1))
+# Print predicted price for the next `FUTURE` days
+print(f"Predicted price after {FUTURE} days: {price}")
 
-actual_prices = test_data[PRICE_VALUE].values
-total_dataset = pd.concat((data["df"][PRICE_VALUE], test_data[PRICE_VALUE]), axis=0)
-model_inputs = total_dataset[len(total_dataset) - len(test_data) - PREDICTION_DAYS:].values
-model_inputs = model_inputs.reshape(-1, 1)
+plt.figure(figsize=(30,10))
+plt.plot(final_df[f'true_close_{FUTURE}'], c='b')
+plt.plot(final_df[f'close_{FUTURE}'], c='r')
+plt.xlabel("Days")
+plt.ylabel("Price")
+plt.legend(["Actual Price", "Predicted Price"])
+plt.show()
 
-scaler = data["column_scaler"][PRICE_VALUE]
-model_inputs = scaler.transform(model_inputs)
-test_data.to_csv(test_data_file)
-
-x_test = []
-for x in range(PREDICTION_DAYS, len(model_inputs)):
-    x_test.append(model_inputs[x - PREDICTION_DAYS:x, 0])
-
-x_test = np.array(x_test)
-
-# Total elements in x_test
-total_elements = x_test.shape[0]  # Total rows in x_test
-num_samples = total_elements // PREDICTION_DAYS  # Correctly calculate number of samples
-
-# Trim x_test to make it divisible by PREDICTION_DAYS
-if total_elements % PREDICTION_DAYS != 0:
-    x_test = x_test[:num_samples * PREDICTION_DAYS]
-
-num_features = len(FEATURE_COLUMNS)
-x_test = np.reshape(x_test, (-1, PREDICTION_DAYS, num_features))
-
-predicted_prices = model.predict(x_test)
-predicted_prices = scaler.inverse_transform(predicted_prices)
-
-real_data = [model_inputs[len(model_inputs) - PREDICTION_DAYS:, 0]]
-real_data = np.array(real_data).reshape(-1, PREDICTION_DAYS)
-
-if real_data.shape[1] == PREDICTION_DAYS:
-    real_data = np.tile(real_data, (1, len(FEATURE_COLUMNS))).reshape(1, PREDICTION_DAYS, len(FEATURE_COLUMNS))
-
-prediction = model.predict(real_data)
-
-prediction = scaler.inverse_transform(prediction)
-
-df = pd.read_csv(test_data_file, index_col='Date', parse_dates=True)
-
-print(f"Predicted prices for the next {FUTURE} days: {prediction[0]}")
-
-n = 1 # number of trading days
-
-fig = candlestick_chart(df, n, prediction[0], FUTURE)
-# fig1 = boxplot_chart(df, n)
+# Optional: Plot candlestick and boxplot charts
+# candlestick_chart(data['df'], 1, y_pred, FUTURE)
+# boxplot_chart(data['df'], 5)
