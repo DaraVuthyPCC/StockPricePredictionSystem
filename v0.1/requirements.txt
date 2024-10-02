@@ -6,3 +6,4 @@ scikit-learn
 pandas-datareader
 yfinance
 plotly
+statsmodels

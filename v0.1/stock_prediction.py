@@ -312,7 +312,7 @@ data = load_and_process_data(COMPANY, N_STEPS, SCALE, FUTURE, TEST_SIZE, FEATURE
 # Model file path
 model_dir = 'model'
 #  model_file = f'{model_dir}/{COMPANY}-{N_STEPS}-{UNITS}-{CELL.__name__}-{N_LAYERS}-{DROPOUT}-{LOSS}-{OPTIMIZER}-{EPOCHS}-{BATCH}-{ACTIVATION}-{len(FEATURE_COLUMNS)}_model.keras'
-model_file = f'/kaggle/input/lstm/keras/default/1/AAPL-100-1024-LSTM-4-0.5-mean_squared_error-adam-100-128-linear-5_model.keras'
+model_file = f'./model/AAPL-100-1024-LSTM-4-0.5-mean_squared_error-adam-100-128-linear-5_model.keras'
 
 # Create and/or load model
 if not os.path.exists(model_dir):
