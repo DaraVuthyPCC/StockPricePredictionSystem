@@ -1,19 +1,23 @@
 ## Import necessary packages
 import os
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-import tensorflow as tf
-import yfinance as yf
-import plotly.graph_objects as go
 import time
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+
+from collections import deque
+from tensorflow.keras.regularizers import l2
+from statsmodels.tsa.arima.model import ARIMA
 from datetime import timedelta, datetime as dt
 from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.callbacks import EarlyStopping
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import Dense, Dropout, LSTM
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.regularizers import l2
-from collections import deque
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 # Create data directory if it doesn't exist
 data_dir = 'data'
@@ -96,6 +100,7 @@ def load_and_process_data(company, n_steps, scale, lookup_step, test_size, featu
     last_sequence = list(sequences) + list(last_sequence)
     last_sequence = np.array(last_sequence).astype(np.float32)
     result['last_sequence'] = last_sequence
+    result['price_value'] = df['Close'].values
 
     # Split data into train and test sets
     X, y = zip(*sequence_data)
@@ -219,7 +224,8 @@ data = load_and_process_data(COMPANY, N_STEPS, SCALE, FUTURE, TEST_SIZE, FEATURE
 
 # Model file path
 model_dir = 'model'
-model_file = f'{model_dir}/{COMPANY}-{N_STEPS}-{UNITS}-{CELL.__name__}-{N_LAYERS}-{DROPOUT}-{LOSS}-{OPTIMIZER}-{EPOCHS}-{BATCH}-{ACTIVATION}-{len(FEATURE_COLUMNS)}_model.keras'
+#  model_file = f'{model_dir}/{COMPANY}-{N_STEPS}-{UNITS}-{CELL.__name__}-{N_LAYERS}-{DROPOUT}-{LOSS}-{OPTIMIZER}-{EPOCHS}-{BATCH}-{ACTIVATION}-{len(FEATURE_COLUMNS)}_model.keras'
+model_file = f'/kaggle/input/lstm/keras/default/1/AAPL-100-1024-LSTM-4-0.5-mean_squared_error-adam-100-128-linear-5_model.keras'
 
 # Create and/or load model
 if not os.path.exists(model_dir):
@@ -253,17 +259,151 @@ final_df = test_df
 
 k_days_predicted_price = multi_step_predict(model, data, FUTURE)
 price = data["column_scaler"]["Close"].inverse_transform(k_days_predicted_price.reshape(-1, 1))
-# Print predicted price for the next `FUTURE` days
-print(f"Predicted price after {FUTURE} days: {price}")
-
-plt.figure(figsize=(30,10))
-plt.plot(final_df[f'true_close_{FUTURE}'], c='b')
-plt.plot(final_df[f'close_{FUTURE}'], c='r')
-plt.xlabel("Days")
-plt.ylabel("Price")
-plt.legend(["Actual Price", "Predicted Price"])
-plt.show()
 
 # Optional: Plot candlestick and boxplot charts
 # candlestick_chart(data['df'], 1, y_pred, FUTURE)
 # boxplot_chart(data['df'], 5)
+
+# ARIMA/SARIMA model
+def arima_and_sarima_lstm_ensemble(data, lstm_model, k_days, scale):
+    """
+    Parameters:
+    - data: The dataset used to train and predict which is AAPL
+    - lstm_model: the already exist LSTM model
+    - k_days: the number of future days to predict
+    - scale: Boolean indicating if data is scaled (used for inverse scaling).
+    """
+
+    # Extract the close prices from the dataset
+    close_prices = data["df"]['Close'].values
+    
+    # Extract last_date
+    last_date = pd.to_datetime(data["df"].index[-1])
+    
+    # Extract future_dates
+    future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=k_days)
+
+    # Train ARIMA and SARIMA model on the close prices
+    arima_model = ARIMA(close_prices, order=(5,1,0))
+    arima_model_fit = arima_model.fit()
+
+    sarima_model = SARIMAX(close_prices, order=(4,1,1), seasonal_order=(1,1,1,6))
+    sarima_model_fit = sarima_model.fit()
+
+    # Get ARIMA and SARIMA predictions over the entire test set and next k_days
+    arima_pred = arima_model_fit.predict(start=len(data["X_train"]), end=len(data["df"])-1)
+    arima_future_pred = arima_model_fit.forecast(steps=k_days)
+
+    sarima_pred = sarima_model_fit.predict(start=len(data["X_train"]), end=len(data["df"])-1)
+    sarima_future_pred = sarima_model_fit.forecast(steps=k_days)
+    
+    # Get the LSTM predictions over the entire test set and next k_days
+    lstm_pred = lstm_model.predict(data["X_test"])
+    if scale:
+        lstm_pred = data["column_scaler"]["Close"].inverse_transform(lstm_pred)
+
+    lstm_future_pred = multi_step_predict(lstm_model, data, k_days)
+    if scale:
+        lstm_future_pred = data["column_scaler"]["Close"].inverse_transform(lstm_future_pred.reshape(-1, 1))    
+        
+    # Ensure the shapes are the same by trimming or interpolating the longer array
+    min_length = min(len(arima_pred), len(lstm_pred))
+    arima_pred = arima_pred[-min_length:]
+    sarima_pred = sarima_pred[-min_length:]
+    lstm_pred = lstm_pred[-min_length:]
+
+    # Combine ARIMA/SARIMA and LSTM predictions
+    arima_ensemble_pred = (arima_pred + lstm_pred.flatten()) / 2
+    arima_future_ensemble_pred = (arima_future_pred + lstm_future_pred.flatten()) / 2
+
+    sarima_ensemble_pred = (sarima_pred + lstm_pred.flatten()) / 2
+    sarima_future_ensemble_pred = (sarima_future_pred + lstm_future_pred.flatten()) / 2
+
+    # Get the actual close prices for the test set
+    y_test = data["y_test"][-min_length:]
+    if scale:
+        y_test = data["column_scaler"]["Close"].inverse_transform(np.expand_dims(y_test, axis=0))
+
+    actual_future_prices = data["df"]["Close"][-k_days:].values   
+
+    # Store all results in a dictionary
+    results = {
+        "future_dates": future_dates,
+        "lstm_pred": lstm_pred,
+        "arima_ensemble_pred": arima_ensemble_pred,
+        "sarima_ensemble_pred": sarima_ensemble_pred,
+        "y_test": y_test,
+        "lstm_future_pred": lstm_future_pred,
+        "arima_future_ensemble_pred": arima_future_ensemble_pred,
+        "sarima_future_ensemble_pred": sarima_future_ensemble_pred,
+        "actual_future_prices": actual_future_prices
+    } 
+        
+    return results
+
+# Generate the full predictions
+results = arima_and_sarima_lstm_ensemble(data, model, FUTURE, SCALE)
+
+prediction_df = pd.DataFrame({
+    'Date': results['future_dates'],
+    'LSTM Price': results['lstm_future_pred'].flatten(),
+    'ARIMA Price': results['arima_future_ensemble_pred'],
+    'SARIMA Price': results['sarima_future_ensemble_pred'],
+    'Actual Price': results['actual_future_prices']
+})
+
+print(prediction_df)
+
+# Evaluation
+# For LSTM predictions
+lstm_mae = mean_absolute_error(prediction_df['Actual Price'], prediction_df['LSTM Price'])
+lstm_mse = mean_squared_error(prediction_df['Actual Price'], prediction_df['LSTM Price'])
+lstm_rmse = np.sqrt(lstm_mse)
+
+# For ARIMA Ensemble predictions
+arima_ensemble_mae = mean_absolute_error(prediction_df['Actual Price'], prediction_df['ARIMA Price'])
+arima_ensemble_mse = mean_squared_error(prediction_df['Actual Price'], prediction_df['ARIMA Price'])
+arima_ensemble_rmse = np.sqrt(arima_ensemble_mse)
+
+# For SARIMA Ensemble predictions
+sarima_ensemble_mae = mean_absolute_error(prediction_df['Actual Price'], prediction_df['SARIMA Price'])
+sarima_ensemble_mse = mean_squared_error(prediction_df['Actual Price'], prediction_df['SARIMA Price'])
+sarima_ensemble_rmse = np.sqrt(sarima_ensemble_mse)
+
+# Print the results
+print("LSTM Prediction Error Metrics:")
+print(f"MAE: {lstm_mae}")
+print(f"MSE: {lstm_mse}")
+print(f"RMSE: {lstm_rmse}\n")
+
+print("ARIMA Ensemble Prediction Error Metrics:")
+print(f"MAE: {arima_ensemble_mae}")
+print(f"MSE: {arima_ensemble_mse}")
+print(f"RMSE: {arima_ensemble_rmse}\n")
+
+print("SARIMA Ensemble Prediction Error Metrics:")
+print(f"MAE: {sarima_ensemble_mae}")
+print(f"MSE: {sarima_ensemble_mse}")
+print(f"RMSE: {sarima_ensemble_rmse}")
+
+# Plot the full actual prices vs model predicted prices
+plt.figure(figsize=(30, 10))
+plt.plot(results['y_test'].flatten(), c='b', label='Actual Price')
+plt.plot(results['arima_ensemble_pred'], c='g', label='ARIMA Ensemble Predicted Price')
+plt.plot(results['sarima_ensemble_pred'], c='y', label='SARIMA Ensemble Predicted Price')
+plt.plot(results['lstm_pred'], c='r', label='LSTM Predicted Price')
+plt.xlabel("Days")
+plt.ylabel("Price")
+plt.legend()
+plt.show()
+
+# Plot the next k_days price
+plt.figure(figsize=(10,5))
+plt.plot(range(1, FUTURE + 1), results['actual_future_prices'].flatten(), c='b', label='Actual Future Price')
+plt.plot(range(1, FUTURE + 1), results['arima_future_ensemble_pred'], c='g', label='ARIMA Ensemble Future Predicted Price')
+plt.plot(range(1, FUTURE + 1), results['sarima_future_ensemble_pred'], c='y', label='SARIMA Ensemble Future Predicted Price')
+plt.plot(range(1, FUTURE + 1), results['lstm_future_pred'], c='r', label='LSTM Future Predicted Price')
+plt.xlabel(f"Days into Future")
+plt.ylabel("Price")
+plt.legend()
+plt.show()
