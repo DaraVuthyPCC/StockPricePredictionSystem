@@ -181,7 +181,8 @@ def arima_and_sarimax_lstm_ensemble(data, lstm_model, k_days, scale, feature_col
     - data: The dataset used to train and predict which is AAPL
     - lstm_model: the already exist LSTM model
     - k_days: the number of future days to predict
-    - scale: Boolean indicating if data is scaled (used for inverse scaling).
+    - scale: Boolean indicating if data is scaled (used for inverse scaling)
+    - feature_columns: the feature columns that are used to predict price
     """
 
     # Extract the close prices from the dataset
@@ -252,6 +253,13 @@ def arima_and_sarimax_lstm_ensemble(data, lstm_model, k_days, scale, feature_col
     } 
         
     return results
+
+# Calculate error metrics for LSTM, ARIMA, and SARIMAX ensembles
+def evaluation(actual, predicted):
+    mae = mean_absolute_error(actual, predicted)
+    mse = mean_squared_error(actual, predicted)
+    rmse = np.sqrt(mse)
+    return mae, mse, rmse
 
 # Function to plot candlestick chart
 def candlestick_chart(df, n, prediction, future):
@@ -357,36 +365,13 @@ prediction_df = pd.DataFrame({
 print(prediction_df)
 
 # Evaluation
-# For LSTM predictions
-lstm_mae = mean_absolute_error(prediction_df['Actual Price'], prediction_df['LSTM Price'])
-lstm_mse = mean_squared_error(prediction_df['Actual Price'], prediction_df['LSTM Price'])
-lstm_rmse = np.sqrt(lstm_mse)
-
-# For ARIMA Ensemble predictions
-arima_ensemble_mae = mean_absolute_error(prediction_df['Actual Price'], prediction_df['ARIMA Price'])
-arima_ensemble_mse = mean_squared_error(prediction_df['Actual Price'], prediction_df['ARIMA Price'])
-arima_ensemble_rmse = np.sqrt(arima_ensemble_mse)
-
-# For SARIMA Ensemble predictions
-sarimax_ensemble_mae = mean_absolute_error(prediction_df['Actual Price'], prediction_df['SARIMAX Price'])
-sarimax_ensemble_mse = mean_squared_error(prediction_df['Actual Price'], prediction_df['SARIMAX Price'])
-sarimax_ensemble_rmse = np.sqrt(sarimax_ensemble_mse)
+lstm_eval = evaluation(prediction_df['Actual Price'], prediction_df['LSTM Price'])
+arima_eval = evaluation(prediction_df['Actual Price'], prediction_df['ARIMA Price'])
+sarimax_eval = evaluation(prediction_df['Actual Price'], prediction_df['SARIMAX Price'])
 
 # Print the results
-print("LSTM Prediction Error Metrics:")
-print(f"MAE: {lstm_mae}")
-print(f"MSE: {lstm_mse}")
-print(f"RMSE: {lstm_rmse}\n")
-
-print("ARIMA Ensemble Prediction Error Metrics:")
-print(f"MAE: {arima_ensemble_mae}")
-print(f"MSE: {arima_ensemble_mse}")
-print(f"RMSE: {arima_ensemble_rmse}\n")
-
-print("SARIMAX Ensemble Prediction Error Metrics:")
-print(f"MAE: {sarimax_ensemble_mae}")
-print(f"MSE: {sarimax_ensemble_mse}")
-print(f"RMSE: {sarimax_ensemble_rmse}")
+for model_name, eval in zip(['LSTM', 'ARIMA Ensemble', 'SARIMAX Ensemble'], [lstm_eval, arima_eval, sarimax_eval]):
+    print(f"{model_name} Prediction Error Metrics:\nMAE: {eval[0]}\nMSE: {eval[1]}\nRMSE: {eval[2]}\n")
 
 # Plot the full actual prices vs model predicted prices
 plt.figure(figsize=(30, 10))
