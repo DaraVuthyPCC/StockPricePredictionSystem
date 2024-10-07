@@ -90,7 +90,7 @@ end_date = datetime(2024, 8, 31)
 all_articles = fetch_gdelt_data_over_time(start_date, end_date)
 
 # Save the articles to a JSON file
-filename = 'gdelt_aapl_news_articles.json'
+filename = './data/gdelt_aapl_news_articles.json'
 with open(filename, 'w') as json_file:
     json.dump(all_articles, json_file, indent=4)
 
@@ -107,4 +107,4 @@ df_sentiment['published_date'] = pd.to_datetime(df_sentiment['seendate'])
 df_sentiment = df_sentiment[['title', 'url', 'published_date', 'domain']]
 
 # Save the DataFrame to a CSV file
-df_sentiment.to_csv('gdelt_aapl_news_articles.csv', index=False)
+df_sentiment.to_csv('./data/gdelt_aapl_news_articles.csv', index=False)
