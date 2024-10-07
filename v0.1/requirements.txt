@@ -7,3 +7,4 @@ pandas-datareader
 yfinance
 plotly
 statsmodels
+transformers
