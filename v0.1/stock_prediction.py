@@ -1,6 +1,9 @@
 ## Import necessary packages
 import os
 import time
+import requests
+import json
+import csv
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -13,6 +16,7 @@ from tensorflow.keras.regularizers import l2
 from statsmodels.tsa.arima.model import ARIMA
 from datetime import timedelta, datetime as dt
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.ensemble import RandomForestRegressor
 from tensorflow.keras.callbacks import EarlyStopping
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from tensorflow.keras.models import Sequential, load_model
@@ -60,18 +64,31 @@ def load_and_process_data(company, n_steps, scale, lookup_step, test_size, featu
     # Load data using yfinance
     df = yf.download(company, train_start, train_end)
     df = df.interpolate().dropna()  # Interpolate missing values and drop remaining NaNs
+    
+    if df.index.name == 'Date' or 'Date' in df.index.names:
+        df = df.reset_index()
+        
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.date
+    
+    # Loading and processing Sentiment Data     
+    sentiment_data = pd.read_csv('./data/gdelt_aapl_sentiment_finbert.csv')
+    sentiment_data['published_date'] = pd.to_datetime(sentiment_data['published_date'], errors='coerce')
+    sentiment_data = sentiment_data.drop_duplicates(subset='published_date')
+    full_date_range = pd.date_range(start=df['Date'].min(), end=df['Date'].max(), freq='D')
+    sentiment_data = sentiment_data.set_index('published_date').reindex(full_date_range).rename_axis('Date').reset_index()
+    sentiment_data['Date'] = pd.to_datetime(sentiment_data['Date'], errors='coerce').dt.date
+    sentiment_data['finbert_sentiment'] = sentiment_data['finbert_sentiment'].fillna('Neutral')
+    sentiment_data['title'] = sentiment_data['title'].fillna("No Title")
+    sentiment_data['url'] = sentiment_data['url'].fillna("No URL")
+    sentiment_data['domain'] = sentiment_data['domain'].fillna("Unknown Domain")
+    sentiment_data = sentiment_data.rename(columns={'finbert_sentiment': 'Sentiment Score'})
+    df = pd.merge(df, sentiment_data, how='left', left_on='Date', right_on='Date')
 
     # Validate feature columns
     for col in feature_columns:
         assert col in df.columns, f"'{col}' does not exist in the dataframe."
 
-    # Add date column if not present
-    if "Date" not in df.columns:
-        df["Date"] = df.index
-
-    # copy the original data for safe keeping
     result = {'df': df.copy()}
-
     # Scale the data if required
     if scale:
         column_scaler = {}
@@ -91,6 +108,7 @@ def load_and_process_data(company, n_steps, scale, lookup_step, test_size, featu
     # Create sequences and targets
     sequence_data = []
     sequences = deque(maxlen=n_steps)
+        
     for entry, target in zip(df[feature_columns].values, df['future'].values):
         sequences.append(entry)
         if len(sequences) == n_steps:
@@ -119,7 +137,7 @@ def load_and_process_data(company, n_steps, scale, lookup_step, test_size, featu
     # Create test dataframe with valid dates
     result["test_df"] = result["df"].loc[valid_dates]
     result["test_df"] = result["test_df"][~result["test_df"].index.duplicated(keep='first')]
-
+    
     return result
 
 # Function to create a model
@@ -174,28 +192,43 @@ def multi_step_predict(model, data, k):
         current_input = np.append(current_input[1:], [new_feature_row], axis=0)
     return np.array(predictions)
 
-# ARIMA/SARIMAX model
+# Adjusting the prediction based on the sentiment
+def adjust_prediction_with_sentiment(prediction, sentiment_score):
+    """
+    Desc: adjusting the current prediction with the sentiment getting from news
+    Parameters:
+        prediction: the prediction that the model have made
+        sentiment_score: the sentiment score for news on that prediction day
+    """
+    if sentiment_score == 'Positive':
+        return prediction * 1.05  # Increase prediction by 5% for positive sentiment
+    elif sentiment_score == 'Negative':
+        return prediction * 0.95  # Decrease prediction by 5% for negative sentiment
+    else:
+        return prediction  # Neutral sentiment: keep the prediction as is
+
+# Arima/Sarimax ensemble with LSTM
 def arima_and_sarimax_lstm_ensemble(data, lstm_model, k_days, scale, feature_columns):
     """
+    Desc: ensemble between arima-LSTM and sarimax-LSTM to improve accuracy
     Parameters:
-    - data: The dataset used to train and predict which is AAPL
-    - lstm_model: the already exist LSTM model
-    - k_days: the number of future days to predict
-    - scale: Boolean indicating if data is scaled (used for inverse scaling)
-    - feature_columns: the feature columns that are used to predict price
+        data: the testing data that was split in the load_and_process_data function
+        lstm_model: the lstm model that I have trained early on
+        k_days: future days to predict
+        scale: scaling the value of each feature
+        feature_columns: the features that used for train and test
     """
-
     # Extract the close prices from the dataset
     close_prices = data["df"]['Close'].values
-    # exog for sarimax multivariate method
+    # exog for SARIMAX multivariate method
     exog_columns = [col for col in feature_columns if col != 'Close']
     exog = data["df"][exog_columns].values 
+
+    # Get the latest date in the data
+    last_date = data["df"]['Date'].max()
+    future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=k_days).to_pydatetime()  # Future k_days dates
     
-    # Extract the last date of the training to make a future dates
-    last_date = pd.to_datetime(data["df"].index[-1])
-    future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=k_days)
-    
-    # Train ARIMA and SARIMA model on the close prices
+    # Train ARIMA and SARIMAX model on the close prices
     arima_model = ARIMA(close_prices, order=(5,1,0))
     arima_model_fit = arima_model.fit()
 
@@ -224,22 +257,38 @@ def arima_and_sarimax_lstm_ensemble(data, lstm_model, k_days, scale, feature_col
     arima_pred = arima_pred[-min_length:]
     sarimax_pred = sarimax_pred[-min_length:]
     lstm_pred = lstm_pred[-min_length:]
-
-    # Combine ARIMA/SARIMA and LSTM predictions
+        
+    # Combine ARIMA/SARIMAX and LSTM predictions
     arima_ensemble_pred = (arima_pred + lstm_pred.flatten()) / 2
-    arima_future_ensemble_pred = (arima_future_pred + lstm_future_pred.flatten()) / 2
-
     sarimax_ensemble_pred = (sarimax_pred + lstm_pred.flatten()) / 2
-    sarimax_future_ensemble_pred = (sarimax_future_pred + lstm_future_pred.flatten()) / 2
 
+    # Apply sentiment adjustment
+    for i in range(min_length):
+        sentiment = data["df"].iloc[i]["Sentiment Score"]
+        arima_ensemble_pred[i] = adjust_prediction_with_sentiment(arima_ensemble_pred[i], sentiment)
+        sarimax_ensemble_pred[i] = adjust_prediction_with_sentiment(sarimax_ensemble_pred[i], sentiment)
+    
+    # Get the last available sentiment
+    last_known_sentiment = data["df"]["Sentiment Score"].iloc[-1]
+
+    # Future predictions for next k_days and let the k_days sentiment the same as the last sentiment available
+    arima_future_ensemble_pred = [adjust_prediction_with_sentiment(pred, last_known_sentiment) for pred in arima_future_pred]
+    sarimax_future_ensemble_pred = [adjust_prediction_with_sentiment(pred, last_known_sentiment) for pred in sarimax_future_pred]
+
+    arima_future_ensemble_pred = (arima_future_pred + lstm_future_pred.flatten()) / 2
+    sarimax_future_ensemble_pred = (sarimax_future_pred + lstm_future_pred.flatten()) / 2
+    
+    # Future predictions for next k_days and let the k_days sentiment the same as the last sentiment available
+    arima_future_ensemble_pred = [adjust_prediction_with_sentiment(pred, last_known_sentiment) for pred in arima_future_pred]
+    sarimax_future_ensemble_pred = [adjust_prediction_with_sentiment(pred, last_known_sentiment) for pred in sarimax_future_pred]
+    
     # Get the actual close prices for the test set
     y_test = data["y_test"][-min_length:]
     if scale:
         y_test = data["column_scaler"]["Close"].inverse_transform(np.expand_dims(y_test, axis=0))
 
-    actual_future_prices = data["df"]["Close"][-k_days:].values   
+    actual_future_prices = data["df"]["Close"][-k_days:].values
 
-    # Store all results in a dictionary
     results = {
         "future_dates": future_dates,
         "lstm_pred": lstm_pred,
@@ -250,8 +299,8 @@ def arima_and_sarimax_lstm_ensemble(data, lstm_model, k_days, scale, feature_col
         "arima_future_ensemble_pred": arima_future_ensemble_pred,
         "sarimax_future_ensemble_pred": sarimax_future_ensemble_pred,
         "actual_future_prices": actual_future_prices
-    } 
-        
+    }
+    
     return results
 
 # Calculate error metrics for LSTM, ARIMA, and SARIMAX ensembles
@@ -311,8 +360,9 @@ data = load_and_process_data(COMPANY, N_STEPS, SCALE, FUTURE, TEST_SIZE, FEATURE
 
 # Model file path
 model_dir = 'model'
-#  model_file = f'{model_dir}/{COMPANY}-{N_STEPS}-{UNITS}-{CELL.__name__}-{N_LAYERS}-{DROPOUT}-{LOSS}-{OPTIMIZER}-{EPOCHS}-{BATCH}-{ACTIVATION}-{len(FEATURE_COLUMNS)}_model.keras'
+# model_file = f'{model_dir}/{COMPANY}-{N_STEPS}-{UNITS}-{CELL.__name__}-{N_LAYERS}-{DROPOUT}-{LOSS}-{OPTIMIZER}-{EPOCHS}-{BATCH}-{ACTIVATION}-{len(FEATURE_COLUMNS)}_model.keras'
 model_file = f'./model/AAPL-100-1024-LSTM-4-0.5-mean_squared_error-adam-100-128-linear-5_model.keras'
+# model_file = '/kaggle/input/lstm/keras/default/1/AAPL-100-1024-LSTM-4-0.5-mean_squared_error-adam-100-128-linear-5_model.keras'
 
 # Create and/or load model
 if not os.path.exists(model_dir):
@@ -394,3 +444,67 @@ plt.xlabel(f"Days into Future")
 plt.ylabel("Price")
 plt.legend()
 plt.show()
+
+# ensemble arima with randomforest
+def arima_rf_ensemble(data, arima_order, n_lags):
+    """
+    Desc: Combines ARIMA and Random Forest models using averaging.
+    Parameters:
+        data: DataFrame containing the time series data with 'Close' prices.
+        arima_order: Tuple (p, d, q) for ARIMA model.
+        n_lags: Number of lagged features for Random Forest.
+    """
+    # training the arima     
+    close_prices = data["df"]['Close'].values
+    arima_model = ARIMA(close_prices, order=arima_order)
+    arima_model_fit = arima_model.fit()
+
+    # Get ARIMA predictions
+    arima_predictions = arima_model_fit.forecast(steps=len(data["df"]['Close']))
+
+    # creating lag feature for randomforest
+    def create_lagged_features(df, lag=n_lags):
+        df_lagged = pd.DataFrame()
+        df_lagged['Close'] = df["df"]['Close']
+        for i in range(1, lag + 1):
+            df_lagged[f'Close_lag_{i}'] = df["df"]['Close'].shift(i)
+        df_lagged.dropna(inplace=True)
+        return df_lagged
+
+    lagged_df = create_lagged_features(data)
+
+    # Split the data into training and test sets
+    train_size = int(0.8 * len(lagged_df))
+    train, test = lagged_df[:train_size], lagged_df[train_size:]
+
+    # Separate features and target for Random Forest
+    X_train, y_train = train.drop('Close', axis=1), train['Close']
+    X_test, y_test = test.drop('Close', axis=1), test['Close']
+
+    # training randomforest
+    rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
+    rf_model.fit(X_train, y_train)
+
+    # Get Random Forest predictions
+    rf_predictions = rf_model.predict(X_test)
+
+    # ensemble arima with randomforest by simple averaging
+    arima_predictions = arima_predictions[-len(y_test):]
+    ensemble_predictions = (arima_predictions + rf_predictions) / 2
+
+    # Evaluate the ensemble
+    ensemble_mae = mean_absolute_error(y_test, ensemble_predictions)
+    ensemble_mse = mean_squared_error(y_test, ensemble_predictions)
+    ensemble_rmse = np.sqrt(ensemble_mse)
+
+    # Print the results
+    print("ARIMA + Random Forest Ensemble Prediction Error Metrics:")
+    print(f"MAE: {ensemble_mae}")
+    print(f"MSE: {ensemble_mse}")
+    print(f"RMSE: {ensemble_rmse}")
+
+    return ensemble_predictions, y_test
+
+pred, ytest = arima_rf_ensemble(data, (5, 1, 0), 3)
+
+print(pred)
