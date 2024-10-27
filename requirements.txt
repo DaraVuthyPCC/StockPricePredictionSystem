@@ -6,3 +6,4 @@ scikit-learn~=1.5.1
 pandas-datareader
 yfinance~=0.2.41
 plotly~=5.23.0
+skfuzzy
